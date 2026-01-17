@@ -1,19 +1,7 @@
-// load-balancer/app/api/edge/route.js
 export const runtime = "edge";
 
 import scaler from "../../../model/scaler.json";
 import model from "../../../model/model_weights.json";
-
-// Static round-robin: A -> B -> C -> A ...
-let rrIndex = 0;
-const BACKENDS = ["A", "B", "C"];
-
-function chooseBackendStatic() {
-  const chosen = BACKENDS[rrIndex % BACKENDS.length];
-  rrIndex += 1;
-  return chosen;
-}
-
 
 const FEATURE_ORDER = [
   "dur",
@@ -30,6 +18,14 @@ const FEATURE_ORDER = [
   "djit",
 ];
 
+// Static round-robin: A -> B -> C -> A ...
+let rrIndex = 0;
+const BACKENDS = ["A", "B", "C"];
+function chooseBackendStatic() {
+  const chosen = BACKENDS[rrIndex % BACKENDS.length];
+  rrIndex += 1;
+  return chosen;
+}
 
 function sigmoid(z) {
   return 1 / (1 + Math.exp(-z));
@@ -41,23 +37,12 @@ function scoreFlow(flow) {
   const weights = model.weights;
   const bias = model.bias;
 
-  if (
-    mean.length !== FEATURE_ORDER.length ||
-    scale.length !== FEATURE_ORDER.length ||
-    weights.length !== FEATURE_ORDER.length
-  ) {
-    throw new Error("Model/scaler dimensions do not match FEATURE_ORDER.");
-  }
-
   let z = bias;
 
   for (let i = 0; i < FEATURE_ORDER.length; i++) {
     const key = FEATURE_ORDER[i];
     const raw = Number(flow?.[key]);
-
-    if (!Number.isFinite(raw)) {
-      throw new Error(`Missing or non-numeric feature: ${key}`);
-    }
+    if (!Number.isFinite(raw)) throw new Error(`Missing/non-numeric feature: ${key}`);
 
     const xNorm = (raw - mean[i]) / scale[i];
     z += weights[i] * xNorm;
@@ -72,9 +57,9 @@ function decide(score) {
   return "ALLOW";
 }
 
-export async function POST(req) {
+export async function POST(request) {
   try {
-    const body = await req.json();
+    const body = await request.json();
     const flow = body?.flow;
 
     const attack_score = scoreFlow(flow);
@@ -85,11 +70,19 @@ export async function POST(req) {
       chosen_backend = chooseBackendStatic();
     }
 
-    return Response.json({
-      attack_score,
-      decision,
-      chosen_backend,
+    // ✅ Log via Node route (so /api/stats can see it)
+    await fetch(new URL("/api/log", request.url), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ts: new Date().toISOString(),
+        attack_score,
+        decision,
+        chosen_backend,
+      }),
     });
+
+    return Response.json({ attack_score, decision, chosen_backend });
   } catch (err) {
     return Response.json(
       { error: err?.message || "Unknown error" },
@@ -98,13 +91,10 @@ export async function POST(req) {
   }
 }
 
-
-// Optional: friendly message if you open /api/edge in browser
 export async function GET() {
   return Response.json({
-  attack_score,
-  decision,
-  chosen_backend,
-});
-
+    ok: true,
+    message: "POST { flow: {...} } to get attack_score + decision + chosen_backend",
+    feature_order: FEATURE_ORDER,
+  });
 }
